@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>SVC Track – Student</title>
+
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: #111;
+      color: #fff;
+    }
+
+    .header {
+      background: #4f46e5;
+      padding: 16px 20px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand h1 {
+      font-size: 20px;
+      font-weight: 600;
+    }
+
+    .back-btn {
+      display: none;
+      background: rgba(255,255,255,0.2);
+      border: none;
+      color: white;
+      padding: 8px 16px;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    .content {
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .section-title {
+      font-size: 24px;
+      margin-bottom: 8px;
+    }
+
+    .bus-count {
+      color: #aaa;
+      margin-bottom: 20px;
+    }
+
+    .bus-list {
+      display: grid;
+      gap: 12px;
+    }
+
+    .bus-card {
+      background: #222;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      cursor: pointer;
+    }
+
+    .bus-card:hover {
+      background: #282828;
+      border-color: #4f46e5;
+    }
+
+    .bus-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+    }
+
+    .bus-name {
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .live-badge {
+      background: #10b981;
+      color: white;
+      padding: 4px 8px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+
+    .bus-route {
+      color: #bbb;
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+
+    .bus-time {
+      color: #888;
+      font-size: 12px;
+    }
+
+    .empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: #666;
+    }
+
+    .empty-icon {
+      font-size: 48px;
+      margin-bottom: 16px;
+    }
+
+    #mapView {
+      display: none;
+      height: calc(100vh - 72px);
+    }
+
+    #map {
+      width: 100%;
+      height: 100%;
+    }
+
+    .loading {
+      text-align: center;
+      padding: 40px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <div class="brand">
+      <span>🚌</span>
+      <h1>SVC Track</h1>
+    </div>
+    <button id="backBtn" class="back-btn">← Back</button>
+  </div>
+
+  <div id="listView">
+    <div class="content">
+      <h2 class="section-title">Active Buses</h2>
+      <p id="busCount" class="bus-count">Loading...</p>
+      
+      <div id="loading" class="loading">Connecting...</div>
+      
+      <div id="emptyState" class="empty" style="display: none;">
+        <div class="empty-icon">🚌</div>
+        <h3>No vehicles active now</h3>
+        <p>Buses will appear when drivers start sharing location</p>
+      </div>
+
+      <div id="busList" class="bus-list"></div>
+    </div>
+  </div>
+
+  <div id="mapView">
+    <div id="map"></div>
+  </div>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script type="module">
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
+    import { getDatabase, ref, onValue, off } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-database.js";
+
+    const firebaseConfig = {
+      apiKey: "AIzaSyDwrAA2x4M0vW7VlPqjfCm4e7VFN5UlGSY",
+      authDomain: "svc-track.firebaseapp.com",
+      databaseURL: "https://svc-track-default-rtdb.firebaseio.com",
+      projectId: "svc-track",
+      storageBucket: "svc-track.firebasestorage.app",
+      messagingSenderId: "705367553123",
+      appId: "1:705367553123:web:d1b3234ad9b4b1ded0f456",
+      measurementId: "G-KQBE1S132E"
+    };
+
+    const app = initializeApp(firebaseConfig);
+    const db = getDatabase(app);
+
+    // Elements
+    const listView = document.getElementById('listView');
+    const mapView = document.getElementById('mapView');
+    const busList = document.getElementById('busList');
+    const emptyState = document.getElementById('emptyState');
+    const loading = document.getElementById('loading');
+    const busCount = document.getElementById('busCount');
+    const backBtn = document.getElementById('backBtn');
+
+    // Map setup
+    const map = L.map('map').setView([11.1271, 78.6569], 8);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '&copy; OpenStreetMap'
+    }).addTo(map);
+
+    let marker = null;
+    let busListenerRef = null;
+    let busInfoCache = new Map();
+
+    // Check if bus is live (within 30 seconds)
+    function isLive(timestamp) {
+      if (!timestamp) return false;
+      return (Date.now() - timestamp) <= 30000;
+    }
+
+    // Get route info
+    async function getBusRoute(busName) {
+      if (busInfoCache.has(busName)) {
+        return busInfoCache.get(busName);
+      }
+      
+      try {
+        const infoRef = ref(db, 'bus_info/' + busName);
+        return new Promise((resolve) => {
+          onValue(infoRef, (snap) => {
+            const data = snap.val();
+            const route = data?.route || 'Route not specified';
+            busInfoCache.set(busName, route);
+            resolve(route);
+          }, { onlyOnce: true });
+        });
+      } catch (error) {
+        return 'Route not available';
+      }
+    }
+
+    // Create bus card
+    async function createBusCard(busName, data) {
+      const route = await getBusRoute(busName);
+      const time = new Date(data.timestamp).toLocaleTimeString();
+      
+      const card = document.createElement('div');
+      card.className = 'bus-card';
+      card.innerHTML = `
+        <div class="bus-header">
+          <div class="bus-name">${busName}</div>
+          <div class="live-badge">LIVE</div>
+        </div>
+        <div class="bus-route">${route}</div>
+        <div class="bus-time">Last updated: ${time}</div>
+      `;
+      
+      card.addEventListener('click', () => openMap(busName));
+      return card;
+    }
+
+    // Update bus list
+    async function updateBusList() {
+      loading.style.display = 'block';
+      busList.innerHTML = '';
+      
+      const listRef = ref(db, 'bus_locations');
+      onValue(listRef, async (snap) => {
+        const data = snap.val() || {};
+        const liveBuses = [];
+        
+        // Filter only live buses
+        for (const [busName, busData] of Object.entries(data)) {
+          if (isLive(busData.timestamp) && busData.lat && busData.lng) {
+            liveBuses.push({ name: busName, data: busData });
+          }
+        }
+        
+        loading.style.display = 'none';
+        
+        if (liveBuses.length === 0) {
+          emptyState.style.display = 'block';
+          busList.style.display = 'none';
+          busCount.textContent = 'No active vehicles';
+        } else {
+          emptyState.style.display = 'none';
+          busList.style.display = 'block';
+          busCount.textContent = `${liveBuses.length} vehicle${liveBuses.length === 1 ? '' : 's'} active`;
+          
+          // Create cards for live buses
+          busList.innerHTML = '';
+          for (const bus of liveBuses) {
+            const card = await createBusCard(bus.name, bus.data);
+            busList.appendChild(card);
+          }
+        }
+      });
+    }
+
+    // Open map
+    function openMap(busName) {
+      listView.style.display = 'none';
+      mapView.style.display = 'block';
+      backBtn.style.display = 'block';
+      
+      attachBusListener(busName);
+      setTimeout(() => map.invalidateSize(), 100);
+    }
+
+    // Close map
+    function closeMap() {
+      listView.style.display = 'block';
+      mapView.style.display = 'none';
+      backBtn.style.display = 'none';
+      detachBusListener();
+    }
+
+    // Track specific bus on map (your exact working logic)
+    function attachBusListener(busName) {
+      detachBusListener();
+      
+      busListenerRef = ref(db, 'bus_locations/' + busName);
+      onValue(busListenerRef, (snap) => {
+        const val = snap.val();
+        if (!val || !val.lat || !val.lng) return;
+        
+        const latlng = [val.lat, val.lng];
+        if (!marker) {
+          marker = L.marker(latlng).addTo(map);
+        } else {
+          marker.setLatLng(latlng);
+        }
+        map.setView(latlng, 16);
+      });
+    }
+
+    function detachBusListener() {
+      if (busListenerRef) {
+        off(busListenerRef);
+        busListenerRef = null;
+      }
+      if (marker) {
+        marker.remove();
+        marker = null;
+      }
+    }
+
+    // Event listeners
+    backBtn.addEventListener('click', closeMap);
+
+    // Initialize
+    updateBusList();
+  </script>
+</body>
+</html>
